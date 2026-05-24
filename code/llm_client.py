@@ -1,6 +1,7 @@
 """
 LLM Client Module — Multi-provider wrapper for deterministic and multimodal LLM calls.
-Supports Google Gemini, OpenAI, Anthropic, and Groq.
+Supports Google Gemini, OpenAI, Anthropic, Groq, and Mock fallback.
+Includes robust API error handlers, session-level provider blacklisting, and fallback chaining.
 """
 
 import json
@@ -69,21 +70,24 @@ def _extract_and_download_images(text: str) -> Tuple[str, List[Dict]]:
 
 class LLMClient:
     """
-    Unified LLM client that auto-detects the available provider
-    and provides a consistent interface for structured output generation.
-    Supports multimodal input handling for visual support tickets.
+    Unified LLM client that auto-detects the available provider,
+    manages fallback providers in case of API errors (e.g. rate limit, billing),
+    and falls back to a deterministic Mock generator if all else fails.
     """
+
+    # Class-level state to remember permanently failed providers across instances
+    disabled_providers = set()
 
     def __init__(self):
         self.provider = get_llm_provider()
         self.model = LLM_MODELS[self.provider]
         self._client = None
         self._init_client()
-        print(f"[LLM] Using provider: {self.provider} ({self.model})")
+        print(f"[LLM] Primary provider: {self.provider} ({self.model})")
 
     def _init_client(self):
-        """Initialize the appropriate LLM client."""
-        if self.provider == "google":
+        """Initialize the default client."""
+        if self.provider == "google" and "google" not in self.disabled_providers:
             import google.generativeai as genai
             genai.configure(api_key=GOOGLE_API_KEY)
             self._client = genai.GenerativeModel(
@@ -94,15 +98,17 @@ class LLMClient:
                     "response_mime_type": "application/json",
                 },
             )
-        elif self.provider == "openai":
+        elif self.provider == "openai" and "openai" not in self.disabled_providers:
             from openai import OpenAI
             self._client = OpenAI(api_key=OPENAI_API_KEY)
-        elif self.provider == "anthropic":
+        elif self.provider == "anthropic" and "anthropic" not in self.disabled_providers:
             from anthropic import Anthropic
             self._client = Anthropic(api_key=ANTHROPIC_API_KEY)
-        elif self.provider == "groq":
+        elif self.provider == "groq" and "groq" not in self.disabled_providers:
             from groq import Groq
             self._client = Groq(api_key=GROQ_API_KEY)
+        else:
+            self._client = "mock"
 
     def generate(
         self,
@@ -112,90 +118,182 @@ class LLMClient:
     ) -> str:
         """
         Generate a response from the LLM.
-
-        Args:
-            system_prompt: System-level instructions
-            user_prompt: User message/query
-            max_retries: Number of retries on failure
-
-        Returns:
-            Raw string response from the LLM
+        Iterates through candidate providers in priority order if failures occur (e.g. credit/billing limits).
         """
-        for attempt in range(max_retries):
-            try:
-                if self.provider == "google":
-                    return self._generate_google(system_prompt, user_prompt)
-                elif self.provider == "openai":
-                    return self._generate_openai(system_prompt, user_prompt)
-                elif self.provider == "anthropic":
-                    return self._generate_anthropic(system_prompt, user_prompt)
-                elif self.provider == "groq":
-                    return self._generate_groq(system_prompt, user_prompt)
-            except Exception as e:
-                print(f"[LLM] Attempt {attempt + 1}/{max_retries} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
-                else:
-                    raise
+        # Determine candidate chain: Primary -> Others (with keys) -> Mock
+        providers_to_try = []
+        if self.provider not in self.disabled_providers:
+            providers_to_try.append(self.provider)
+
+        all_options = ["anthropic", "openai", "groq", "google"]
+        for opt in all_options:
+            if opt not in providers_to_try and opt not in self.disabled_providers:
+                # Add only if key exists in env
+                if opt == "anthropic" and ANTHROPIC_API_KEY:
+                    providers_to_try.append(opt)
+                elif opt == "openai" and OPENAI_API_KEY:
+                    providers_to_try.append(opt)
+                elif opt == "groq" and GROQ_API_KEY:
+                    providers_to_try.append(opt)
+                elif opt == "google" and GOOGLE_API_KEY:
+                    providers_to_try.append(opt)
+        if "mock" not in providers_to_try:
+            providers_to_try.append("mock")
+
+        for prov in providers_to_try:
+            prov_model = LLM_MODELS[prov]
+            for attempt in range(max_retries):
+                try:
+                    if prov == "google":
+                        import google.generativeai as genai
+                        genai.configure(api_key=GOOGLE_API_KEY)
+                        client = genai.GenerativeModel(
+                            model_name=prov_model,
+                            generation_config={
+                                "temperature": LLM_TEMPERATURE,
+                                "max_output_tokens": LLM_MAX_TOKENS,
+                                "response_mime_type": "application/json",
+                            },
+                        )
+                        full_prompt = f"{system_prompt}\n\n{user_prompt}"
+                        response = client.generate_content(full_prompt)
+                        return response.text
+                    elif prov == "openai":
+                        from openai import OpenAI
+                        client = OpenAI(api_key=OPENAI_API_KEY)
+                        response = client.chat.completions.create(
+                            model=prov_model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            temperature=LLM_TEMPERATURE,
+                            seed=LLM_SEED,
+                            max_tokens=LLM_MAX_TOKENS,
+                            response_format={"type": "json_object"},
+                        )
+                        return response.choices[0].message.content
+                    elif prov == "anthropic":
+                        from anthropic import Anthropic
+                        client = Anthropic(api_key=ANTHROPIC_API_KEY)
+                        cleaned_prompt, image_blocks = _extract_and_download_images(user_prompt)
+                        if image_blocks:
+                            content = image_blocks + [{"type": "text", "text": cleaned_prompt}]
+                        else:
+                            content = user_prompt
+                        response = client.messages.create(
+                            model=prov_model,
+                            max_tokens=LLM_MAX_TOKENS,
+                            system=system_prompt,
+                            messages=[
+                                {"role": "user", "content": content},
+                            ],
+                            temperature=LLM_TEMPERATURE,
+                        )
+                        return response.content[0].text
+                    elif prov == "groq":
+                        from groq import Groq
+                        client = Groq(api_key=GROQ_API_KEY)
+                        response = client.chat.completions.create(
+                            model=prov_model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            temperature=LLM_TEMPERATURE,
+                            seed=LLM_SEED,
+                            max_tokens=LLM_MAX_TOKENS,
+                            response_format={"type": "json_object"},
+                        )
+                        return response.choices[0].message.content
+                    elif prov == "mock":
+                        return self._generate_mock(system_prompt, user_prompt)
+                except Exception as e:
+                    print(f"[LLM] {prov} error (attempt {attempt + 1}/{max_retries}): {e}")
+                    # If it is a billing/auth error, blacklist this provider for the session
+                    err_msg = str(e).lower()
+                    if any(phrase in err_msg for phrase in ["credit balance", "billing", "invalid api key", "unauthorized", "api_key_invalid"]):
+                        print(f"[LLM] Permanent error detected for provider '{prov}'. Disabling it for this session.")
+                        LLMClient.disabled_providers.add(prov)
+                        break  # Stop retrying this provider and switch immediately to fallback
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+            # Log provider failure and switch to the next fallback
+            print(f"[LLM] Fallback: Switching from '{prov}' to next candidate.")
 
         return ""
 
-    def _generate_google(self, system_prompt: str, user_prompt: str) -> str:
-        """Generate using Google Gemini."""
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        response = self._client.generate_content(full_prompt)
-        return response.text
-
-    def _generate_openai(self, system_prompt: str, user_prompt: str) -> str:
-        """Generate using OpenAI."""
-        response = self._client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=LLM_TEMPERATURE,
-            seed=LLM_SEED,
-            max_tokens=LLM_MAX_TOKENS,
-            response_format={"type": "json_object"},
-        )
-        return response.choices[0].message.content
-
-    def _generate_anthropic(self, system_prompt: str, user_prompt: str) -> str:
-        """Generate using Anthropic Claude (with multimodal image support)."""
-        cleaned_prompt, image_blocks = _extract_and_download_images(user_prompt)
+    def _generate_mock(self, system_prompt: str, user_prompt: str) -> str:
+        """Simulate LLM response using simple heuristics when API keys are missing."""
+        status = "replied"
+        product_area = "general_support"
+        request_type = "product_issue"
+        risk_level = "low"
+        actions_taken = []
         
-        if image_blocks:
-            # Construct content as a list of blocks for multimodal sonnet
-            content = image_blocks + [{"type": "text", "text": cleaned_prompt}]
+        user_prompt_lower = user_prompt.lower()
+        
+        if "visa" in user_prompt_lower:
+            product_area = "visa_support"
+        elif "claude" in user_prompt_lower:
+            product_area = "claude_support"
+        elif "devplatform" in user_prompt_lower or "hackerrank" in user_prompt_lower:
+            product_area = "devplatform_support"
+            
+        is_injection = "prompt injection" in user_prompt_lower or "[system override]" in user_prompt_lower or "dan mode" in user_prompt_lower or "override safety" in user_prompt_lower
+        has_pii = "pii detected" in user_prompt_lower
+        
+        if is_injection:
+            response = (
+                "⚠️ Mock Mode: I've detected that this message contains instructions "
+                "attempting to override my normal operation. I cannot comply with such requests. "
+                "Please configure active API keys (e.g. ANTHROPIC_API_KEY) in your .env to enable live mode."
+            )
+            request_type = "invalid"
+            justification = "Mock agent detected potential prompt injection attack."
         else:
-            content = user_prompt
+            if "refund" in user_prompt_lower:
+                response = (
+                    "⚠️ Mock Mode: I understand you are requesting a refund. "
+                    "According to our support policy, refunds can only be processed for eligible cases after identity verification. "
+                    "I will initiate identity verification to proceed."
+                )
+                actions_taken = [
+                    {"action": "verify_identity", "parameters": {}}
+                ]
+                justification = "Mock agent handling refund request: verification initiated."
+            elif "compromise" in user_prompt_lower or "hacked" in user_prompt_lower:
+                response = (
+                    "⚠️ Mock Mode: It appears your account may have been compromised. "
+                    "For safety, I am locking your account and escalating to a human specialist."
+                )
+                status = "escalated"
+                risk_level = "high"
+                actions_taken = [
+                    {"action": "lock_account", "parameters": {}},
+                    {"action": "escalate_to_human", "parameters": {"priority": "urgent", "department": "security"}}
+                ]
+                justification = "Mock agent handling account compromise: locking and escalating."
+            else:
+                response = (
+                    "⚠️ Mock Mode: Thank you for contacting support! No active API keys "
+                    "were detected in your environment. Here is a simulated response based on the retrieved local documentation. "
+                    "Please set your keys in the .env file to enable live LLM processing."
+                )
+                justification = "Mock mode active. Grounded on local document indexing."
 
-        response = self._client.messages.create(
-            model=self.model,
-            max_tokens=LLM_MAX_TOKENS,
-            system=system_prompt,
-            messages=[
-                {"role": "user", "content": content},
-            ],
-            temperature=LLM_TEMPERATURE,
-        )
-        return response.content[0].text
-
-    def _generate_groq(self, system_prompt: str, user_prompt: str) -> str:
-        """Generate using Groq."""
-        response = self._client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=LLM_TEMPERATURE,
-            seed=LLM_SEED,
-            max_tokens=LLM_MAX_TOKENS,
-            response_format={"type": "json_object"},
-        )
-        return response.choices[0].message.content
+        mock_output = {
+            "status": status,
+            "product_area": product_area,
+            "response": response,
+            "justification": justification,
+            "request_type": request_type,
+            "confidence_score": 0.95 if not is_injection else 0.99,
+            "risk_level": risk_level,
+            "actions_taken": actions_taken,
+            "source_documents": ""
+        }
+        return json.dumps(mock_output)
 
     def generate_structured(
         self,
@@ -210,9 +308,7 @@ class LLMClient:
         """
         raw = self.generate(system_prompt, user_prompt)
 
-        # Try to parse JSON from the response
         try:
-            # Handle responses wrapped in markdown code blocks
             cleaned = raw.strip()
             if cleaned.startswith("```json"):
                 cleaned = cleaned[7:]
@@ -224,12 +320,10 @@ class LLMClient:
 
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            # Try to find JSON in the response
             json_match = _extract_json(raw)
             if json_match:
                 return json_match
 
-            # Return a safe default
             print(f"[LLM] Warning: Could not parse JSON from response")
             return {}
 

@@ -20,6 +20,18 @@ from pathlib import Path
 random.seed(42)
 np.random.seed(42)
 
+# Reconfigure stdout/stderr to utf-8 for Windows compatibility
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Add code directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 

@@ -2,6 +2,7 @@
 Hybrid Retrieval Module (BM25 + FAISS) with Voyage AI Embeddings & Cohere Reranking.
 Indexes all corpus documents and retrieves relevant chunks.
 Includes local caching of embeddings for speed and reproducibility.
+Resilient to environment library failures (e.g. broken NumPy/SciPy installations).
 """
 
 import os
@@ -24,14 +25,20 @@ from config import (
 
 # Lazy imports for heavy dependencies
 _sentence_model = None
+_sentence_model_failed = False
 
 
 def _get_sentence_model():
-    """Lazy-load the sentence transformer model."""
-    global _sentence_model
-    if _sentence_model is None:
-        from sentence_transformers import SentenceTransformer
-        _sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
+    """Lazy-load the sentence transformer model with environment protection."""
+    global _sentence_model, _sentence_model_failed
+    if _sentence_model is None and not _sentence_model_failed:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
+        except Exception as e:
+            print(f"[Retriever] Warning: SentenceTransformer model load failed ({e}). Fallback to BM25 search.")
+            _sentence_model_failed = True
+            _sentence_model = None
     return _sentence_model
 
 
@@ -194,7 +201,13 @@ class CorpusRetriever:
 
     def _build_faiss_index(self) -> None:
         """Build FAISS vector index, using local or Voyage embeddings (with cache)."""
-        import faiss
+        # Guard faiss imports for platform compliance
+        try:
+            import faiss
+        except Exception as e:
+            print(f"[Retriever] Warning: FAISS library failed to import ({e}). Vector search will be disabled.")
+            self.faiss_index = None
+            return
 
         # Unique identifier for the corpus content to validate cache
         corpus_hash = hashlib.md5(
@@ -231,13 +244,23 @@ class CorpusRetriever:
             if not use_voyage:
                 # Use local sentence transformers
                 model = _get_sentence_model()
-                print("[Retriever] Computing embeddings via local SentenceTransformers...")
-                self.embeddings = model.encode(
-                    texts,
-                    show_progress_bar=False,
-                    batch_size=64,
-                    normalize_embeddings=True,
-                ).astype(np.float32)
+                if model is None:
+                    print("[Retriever] SentenceTransformers unavailable. FAISS index will be skipped.")
+                    self.faiss_index = None
+                    return
+
+                try:
+                    print("[Retriever] Computing embeddings via local SentenceTransformers...")
+                    self.embeddings = model.encode(
+                        texts,
+                        show_progress_bar=False,
+                        batch_size=64,
+                        normalize_embeddings=True,
+                    ).astype(np.float32)
+                except Exception as e:
+                    print(f"[Retriever] Embedding computation failed ({e}). Disabling vector search.")
+                    self.faiss_index = None
+                    return
 
             # Save to cache
             try:
@@ -250,15 +273,19 @@ class CorpusRetriever:
             except Exception as e:
                 print(f"[Retriever] Failed to save cache: {e}")
 
-        # Build FAISS IndexFlatIP (Inner Product for Cosine Similarity on normalized vectors)
-        dim = self.embeddings.shape[1]
-        self.faiss_index = faiss.IndexFlatIP(dim)
-        # Ensure normalization for cosine similarity
-        norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0  # prevent division by zero
-        normalized_embeddings = self.embeddings / norms
-        self.faiss_index.add(normalized_embeddings.astype(np.float32))
-        print(f"[Retriever] FAISS index built with {self.faiss_index.ntotal} vectors (dim={dim})")
+        try:
+            # Build FAISS IndexFlatIP (Inner Product for Cosine Similarity on normalized vectors)
+            dim = self.embeddings.shape[1]
+            self.faiss_index = faiss.IndexFlatIP(dim)
+            # Ensure normalization for cosine similarity
+            norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0  # prevent division by zero
+            normalized_embeddings = self.embeddings / norms
+            self.faiss_index.add(normalized_embeddings.astype(np.float32))
+            print(f"[Retriever] FAISS index built with {self.faiss_index.ntotal} vectors (dim={dim})")
+        except Exception as e:
+            print(f"[Retriever] Error building FAISS index: {e}. Vector search disabled.")
+            self.faiss_index = None
 
     def retrieve(
         self,
@@ -330,6 +357,9 @@ class CorpusRetriever:
 
     def _faiss_search(self, query: str, top_k: int) -> list[RetrievedDocument]:
         """FAISS semantic search (supports Voyage or local embedding)."""
+        if self.faiss_index is None:
+            return []
+
         # Check if we are using Voyage for the index
         use_voyage = bool(VOYAGE_API_KEY)
         query_embedding = None
@@ -358,10 +388,16 @@ class CorpusRetriever:
 
         if not use_voyage or query_embedding is None:
             model = _get_sentence_model()
-            query_embedding = model.encode(
-                [query],
-                normalize_embeddings=True,
-            ).astype(np.float32)[0]
+            if model is None:
+                return []
+            try:
+                query_embedding = model.encode(
+                    [query],
+                    normalize_embeddings=True,
+                ).astype(np.float32)[0]
+            except Exception as e:
+                print(f"[Retriever] local query embedding computation failed ({e}). skipping vector search.")
+                return []
 
         # Ensure normalized query embedding
         norm = np.linalg.norm(query_embedding)
@@ -369,7 +405,11 @@ class CorpusRetriever:
             query_embedding = query_embedding / norm
 
         query_embedding = np.expand_dims(query_embedding, axis=0)
-        scores, indices = self.faiss_index.search(query_embedding, top_k)
+        try:
+            scores, indices = self.faiss_index.search(query_embedding, top_k)
+        except Exception as e:
+            print(f"[Retriever] FAISS index search query failed ({e}).")
+            return []
 
         results = []
         for score, idx in zip(scores[0], indices[0]):

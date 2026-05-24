@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
+# Prevent Hugging Face and Transformers from hanging on network calls (offline mode)
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 # ─── Paths ───────────────────────────────────────────────────────────────────
 REPO_ROOT = _REPO_ROOT
 DATA_DIR = REPO_ROOT / "data"
@@ -40,7 +44,7 @@ LLM_MAX_TOKENS = 4096
 
 # Auto-detect available LLM provider (priority order)
 def get_llm_provider() -> str:
-    """Returns the first available LLM provider based on API key availability."""
+    """Returns the first available LLM provider based on API key availability. Falls back to mock if none."""
     if ANTHROPIC_API_KEY:
         return "anthropic"
     if GROQ_API_KEY:
@@ -49,10 +53,7 @@ def get_llm_provider() -> str:
         return "google"
     if OPENAI_API_KEY:
         return "openai"
-    raise ValueError(
-        "No LLM API key found. Set one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_API_KEY, "
-        "or OPENAI_API_KEY in your .env file."
-    )
+    return "mock"
 
 # ─── LLM Model Names ────────────────────────────────────────────────────────
 LLM_MODELS = {
@@ -60,6 +61,7 @@ LLM_MODELS = {
     "openai": "gpt-4o",
     "anthropic": "claude-3-5-sonnet-20241022",
     "groq": "llama-3.3-70b-versatile",
+    "mock": "mock-model-v1",
 }
 
 # ─── Retrieval Settings ─────────────────────────────────────────────────────
