@@ -243,7 +243,7 @@ def detect_language(text: str) -> str:
     if scores:
         # If the best non-English score is significant, return that language
         best_lang = max(scores, key=scores.get)
-        if scores[best_lang] >= 3:
+        if scores[best_lang] >= 2:
             return best_lang
 
     # Default to English
