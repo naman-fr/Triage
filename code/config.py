@@ -30,6 +30,8 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
+VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
 
 # ─── LLM Settings (deterministic) ───────────────────────────────────────────
 LLM_TEMPERATURE = 0.0
@@ -39,24 +41,24 @@ LLM_MAX_TOKENS = 4096
 # Auto-detect available LLM provider (priority order)
 def get_llm_provider() -> str:
     """Returns the first available LLM provider based on API key availability."""
-    if GOOGLE_API_KEY:
-        return "google"
-    if OPENAI_API_KEY:
-        return "openai"
     if ANTHROPIC_API_KEY:
         return "anthropic"
     if GROQ_API_KEY:
         return "groq"
+    if GOOGLE_API_KEY:
+        return "google"
+    if OPENAI_API_KEY:
+        return "openai"
     raise ValueError(
-        "No LLM API key found. Set one of: GOOGLE_API_KEY, OPENAI_API_KEY, "
-        "ANTHROPIC_API_KEY, or GROQ_API_KEY in your .env file."
+        "No LLM API key found. Set one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_API_KEY, "
+        "or OPENAI_API_KEY in your .env file."
     )
 
 # ─── LLM Model Names ────────────────────────────────────────────────────────
 LLM_MODELS = {
     "google": "gemini-2.5-flash",
     "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-20250514",
+    "anthropic": "claude-3-5-sonnet-20241022",
     "groq": "llama-3.3-70b-versatile",
 }
 

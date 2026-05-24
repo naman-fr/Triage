@@ -1,11 +1,14 @@
 """
-LLM Client Module — Multi-provider wrapper for deterministic LLM calls.
+LLM Client Module — Multi-provider wrapper for deterministic and multimodal LLM calls.
 Supports Google Gemini, OpenAI, Anthropic, and Groq.
 """
 
 import json
 import time
-from typing import Optional
+import re
+import base64
+import requests
+from typing import Optional, Tuple, List, Dict
 
 from config import (
     GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY,
@@ -13,11 +16,62 @@ from config import (
     get_llm_provider,
 )
 
+IMAGE_URL_PATTERN = re.compile(
+    r'(https?://\S+\.(?:png|jpg|jpeg|gif|webp|svg)(?:\?\S+)?|data:image/(?:png|jpg|jpeg|gif|webp);base64,\S+)',
+    re.IGNORECASE
+)
+
+
+def _extract_and_download_images(text: str) -> Tuple[str, List[Dict]]:
+    """
+    Extracts image URLs or Base64 payloads from the text prompt,
+    downloads and encodes them, and returns (cleaned_text, image_blocks).
+    Used for multimodal analysis of screenshots, error logs, etc.
+    """
+    cleaned_text = text
+    image_blocks = []
+    
+    matches = IMAGE_URL_PATTERN.findall(text)
+    for match in matches:
+        cleaned_text = cleaned_text.replace(match, "")
+        try:
+            if match.startswith("data:image/"):
+                header, base64_data = match.split(",", 1)
+                media_type = header.split(";")[0].split(":")[1]
+                image_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": base64_data.strip()
+                    }
+                })
+            else:
+                res = requests.get(match, timeout=10)
+                res.raise_for_status()
+                content_type = res.headers.get("Content-Type", "image/png")
+                if "image" not in content_type:
+                    content_type = "image/png"
+                img_data = base64.b64encode(res.content).decode("utf-8")
+                image_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": content_type,
+                        "data": img_data
+                    }
+                })
+        except Exception as e:
+            print(f"[LLM Client] Multimodal error processing image {match[:50]}: {e}")
+            
+    return cleaned_text.strip(), image_blocks
+
 
 class LLMClient:
     """
     Unified LLM client that auto-detects the available provider
     and provides a consistent interface for structured output generation.
+    Supports multimodal input handling for visual support tickets.
     """
 
     def __init__(self):
@@ -108,13 +162,21 @@ class LLMClient:
         return response.choices[0].message.content
 
     def _generate_anthropic(self, system_prompt: str, user_prompt: str) -> str:
-        """Generate using Anthropic Claude."""
+        """Generate using Anthropic Claude (with multimodal image support)."""
+        cleaned_prompt, image_blocks = _extract_and_download_images(user_prompt)
+        
+        if image_blocks:
+            # Construct content as a list of blocks for multimodal sonnet
+            content = image_blocks + [{"type": "text", "text": cleaned_prompt}]
+        else:
+            content = user_prompt
+
         response = self._client.messages.create(
             model=self.model,
             max_tokens=LLM_MAX_TOKENS,
             system=system_prompt,
             messages=[
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": content},
             ],
             temperature=LLM_TEMPERATURE,
         )
@@ -174,7 +236,6 @@ class LLMClient:
 
 def _extract_json(text: str) -> Optional[dict]:
     """Try to extract a JSON object from text."""
-    # Find the first { and last }
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:

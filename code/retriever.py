@@ -1,15 +1,17 @@
 """
-Hybrid Retrieval Module (BM25 + FAISS) for corpus-grounded responses.
+Hybrid Retrieval Module (BM25 + FAISS) with Voyage AI Embeddings & Cohere Reranking.
 Indexes all corpus documents and retrieves relevant chunks.
+Includes local caching of embeddings for speed and reproducibility.
 """
 
 import os
 import re
-import hashlib
 import pickle
+import hashlib
+import requests
 import numpy as np
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from rank_bm25 import BM25Okapi
 
@@ -17,12 +19,11 @@ from models import RetrievedDocument
 from config import (
     DATA_DIR, REPO_ROOT, CORPUS_DIRS,
     BM25_TOP_K, FAISS_TOP_K, FINAL_TOP_K,
-    RANDOM_SEED,
+    RANDOM_SEED, VOYAGE_API_KEY, COHERE_API_KEY,
 )
 
 # Lazy imports for heavy dependencies
 _sentence_model = None
-_faiss_index = None
 
 
 def _get_sentence_model():
@@ -37,7 +38,8 @@ def _get_sentence_model():
 class CorpusRetriever:
     """
     Hybrid retriever combining BM25 (keyword) and FAISS (semantic) search.
-    Ensures deterministic retrieval with fixed seeds.
+    Upgrades to Voyage AI embeddings and Cohere Reranking when API keys are present.
+    Ensures deterministic retrieval with fixed seeds and local caching.
     """
 
     def __init__(self):
@@ -50,10 +52,14 @@ class CorpusRetriever:
         # Set for validating file paths
         self.valid_paths: set[str] = set()
 
+        # Cache paths
+        self.cache_dir = REPO_ROOT / "data" / ".cache"
+        self.cache_dir.mkdir(exist_ok=True)
+
     def index_corpus(self) -> None:
         """
         Index all markdown files in the data directory.
-        Called once at startup.
+        Called once at startup. Loads cached embeddings if available.
         """
         if self._indexed:
             return
@@ -63,6 +69,10 @@ class CorpusRetriever:
 
         # Walk all data directories and collect markdown files
         for root, dirs, files in os.walk(DATA_DIR):
+            # Skip cache folder
+            if ".cache" in root:
+                continue
+
             for fname in sorted(files):  # sorted for determinism
                 if not fname.endswith(".md"):
                     continue
@@ -83,11 +93,16 @@ class CorpusRetriever:
 
         print(f"[Retriever] Indexed {len(self.documents)} chunks from {len(self.valid_paths)} files")
 
+        if not self.documents:
+            print("[Retriever] Warning: No documents found to index!")
+            self._indexed = True
+            return
+
         # Build BM25 index
         tokenized = [doc["tokens"] for doc in self.documents]
         self.bm25 = BM25Okapi(tokenized)
 
-        # Build FAISS index
+        # Build FAISS index (inner product / cosine similarity)
         self._build_faiss_index()
 
         self._indexed = True
@@ -145,26 +160,105 @@ class CorpusRetriever:
         text = re.sub(r"[^\w\s]", " ", text)
         return [t for t in text.split() if len(t) > 1]
 
+    def _compute_voyage_embeddings(self, texts: list[str]) -> np.ndarray:
+        """Call Voyage AI API to compute embeddings."""
+        print(f"[Retriever] Computing {len(texts)} embeddings via Voyage AI...")
+        headers = {
+            "Authorization": f"Bearer {VOYAGE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        embeddings = []
+        batch_size = 128
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            body = {
+                "input": batch,
+                "model": "voyage-3"
+            }
+            try:
+                res = requests.post(
+                    "https://api.voyageai.com/v1/embeddings",
+                    json=body,
+                    headers=headers,
+                    timeout=30
+                )
+                res.raise_for_status()
+                data = res.json()
+                embeddings.extend([item["embedding"] for item in data["data"]])
+            except Exception as e:
+                print(f"[Retriever] Voyage API error: {e}. Falling back to local SentenceTransformers.")
+                raise RuntimeError("Voyage AI call failed") from e
+                
+        return np.array(embeddings, dtype=np.float32)
+
     def _build_faiss_index(self) -> None:
-        """Build FAISS vector index from document embeddings."""
+        """Build FAISS vector index, using local or Voyage embeddings (with cache)."""
         import faiss
 
-        model = _get_sentence_model()
-        texts = [doc["content"][:500] for doc in self.documents]  # limit for speed
+        # Unique identifier for the corpus content to validate cache
+        corpus_hash = hashlib.md5(
+            "".join(doc["content"] for doc in self.documents).encode("utf-8")
+        ).hexdigest()
 
-        print("[Retriever] Computing embeddings...")
-        self.embeddings = model.encode(
-            texts,
-            show_progress_bar=False,
-            batch_size=64,
-            normalize_embeddings=True,
-        )
+        use_voyage = bool(VOYAGE_API_KEY)
+        cache_name = "voyage_cache.pkl" if use_voyage else "local_cache.pkl"
+        cache_path = self.cache_dir / cache_name
 
-        # Build FAISS index (Inner Product for cosine similarity with normalized vectors)
+        loaded_from_cache = False
+        if cache_path.exists():
+            try:
+                with open(cache_path, "rb") as f:
+                    cache_data = pickle.load(f)
+                if cache_data.get("hash") == corpus_hash:
+                    self.embeddings = cache_data["embeddings"]
+                    print(f"[Retriever] Loaded cached embeddings from {cache_name}")
+                    loaded_from_cache = True
+            except Exception as e:
+                print(f"[Retriever] Failed to load cache: {e}")
+
+        if not loaded_from_cache:
+            texts = [doc["content"] for doc in self.documents]
+            
+            if use_voyage:
+                try:
+                    self.embeddings = self._compute_voyage_embeddings(texts)
+                except Exception:
+                    # Fall back to local
+                    use_voyage = False
+                    print("[Retriever] Reverting to local SentenceTransformers model...")
+            
+            if not use_voyage:
+                # Use local sentence transformers
+                model = _get_sentence_model()
+                print("[Retriever] Computing embeddings via local SentenceTransformers...")
+                self.embeddings = model.encode(
+                    texts,
+                    show_progress_bar=False,
+                    batch_size=64,
+                    normalize_embeddings=True,
+                ).astype(np.float32)
+
+            # Save to cache
+            try:
+                with open(cache_path, "wb") as f:
+                    pickle.dump({
+                        "hash": corpus_hash,
+                        "embeddings": self.embeddings
+                    }, f)
+                print(f"[Retriever] Saved embeddings cache to {cache_name}")
+            except Exception as e:
+                print(f"[Retriever] Failed to save cache: {e}")
+
+        # Build FAISS IndexFlatIP (Inner Product for Cosine Similarity on normalized vectors)
         dim = self.embeddings.shape[1]
         self.faiss_index = faiss.IndexFlatIP(dim)
-        self.faiss_index.add(self.embeddings.astype(np.float32))
-        print(f"[Retriever] FAISS index built with {self.faiss_index.ntotal} vectors")
+        # Ensure normalization for cosine similarity
+        norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0  # prevent division by zero
+        normalized_embeddings = self.embeddings / norms
+        self.faiss_index.add(normalized_embeddings.astype(np.float32))
+        print(f"[Retriever] FAISS index built with {self.faiss_index.ntotal} vectors (dim={dim})")
 
     def retrieve(
         self,
@@ -173,7 +267,7 @@ class CorpusRetriever:
         company_filter: Optional[str] = None,
     ) -> list[RetrievedDocument]:
         """
-        Hybrid retrieval: BM25 + FAISS, merged and de-duplicated.
+        Hybrid retrieval: BM25 + FAISS (Voyage or local), merged and optionally Cohere-reranked.
 
         Args:
             query: Search query text
@@ -186,25 +280,37 @@ class CorpusRetriever:
         if not self._indexed:
             self.index_corpus()
 
-        if not query or not query.strip():
+        if not self.documents or not query or not query.strip():
             return []
 
+        # Retrieve a slightly larger pool for re-ranking/merging
+        pool_size = max(top_k * 4, 20)
+
         # BM25 retrieval
-        bm25_results = self._bm25_search(query, BM25_TOP_K)
+        bm25_results = self._bm25_search(query, pool_size)
 
         # FAISS retrieval
-        faiss_results = self._faiss_search(query, FAISS_TOP_K)
+        faiss_results = self._faiss_search(query, pool_size)
 
-        # Merge and de-duplicate
+        # Merge results with RRF first
         merged = self._merge_results(bm25_results, faiss_results, company_filter)
 
-        # Return top-k
-        return merged[:top_k]
+        # Apply Cohere Reranking if API key is present
+        if COHERE_API_KEY and merged:
+            try:
+                merged = self._cohere_rerank_pool(query, merged, top_k)
+            except Exception as e:
+                print(f"[Retriever] Cohere rerank failed: {e}. Falling back to standard RRF ranking.")
+                merged = merged[:top_k]
+        else:
+            merged = merged[:top_k]
+
+        return merged
 
     def _bm25_search(self, query: str, top_k: int) -> list[RetrievedDocument]:
         """BM25 keyword search."""
         tokens = self._tokenize(query)
-        if not tokens:
+        if not tokens or self.bm25 is None:
             return []
 
         scores = self.bm25.get_scores(tokens)
@@ -223,13 +329,46 @@ class CorpusRetriever:
         return results
 
     def _faiss_search(self, query: str, top_k: int) -> list[RetrievedDocument]:
-        """FAISS semantic search."""
-        model = _get_sentence_model()
-        query_embedding = model.encode(
-            [query],
-            normalize_embeddings=True,
-        ).astype(np.float32)
+        """FAISS semantic search (supports Voyage or local embedding)."""
+        # Check if we are using Voyage for the index
+        use_voyage = bool(VOYAGE_API_KEY)
+        query_embedding = None
 
+        if use_voyage:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {VOYAGE_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                body = {
+                    "input": [query],
+                    "model": "voyage-3"
+                }
+                res = requests.post(
+                    "https://api.voyageai.com/v1/embeddings",
+                    json=body,
+                    headers=headers,
+                    timeout=10
+                )
+                res.raise_for_status()
+                query_embedding = np.array(res.json()["data"][0]["embedding"], dtype=np.float32)
+            except Exception as e:
+                print(f"[Retriever] Voyage query embedding failed: {e}. Falling back to local SentenceTransformers.")
+                use_voyage = False
+
+        if not use_voyage or query_embedding is None:
+            model = _get_sentence_model()
+            query_embedding = model.encode(
+                [query],
+                normalize_embeddings=True,
+            ).astype(np.float32)[0]
+
+        # Ensure normalized query embedding
+        norm = np.linalg.norm(query_embedding)
+        if norm > 0:
+            query_embedding = query_embedding / norm
+
+        query_embedding = np.expand_dims(query_embedding, axis=0)
         scores, indices = self.faiss_index.search(query_embedding, top_k)
 
         results = []
@@ -251,7 +390,7 @@ class CorpusRetriever:
         company_filter: Optional[str] = None,
     ) -> list[RetrievedDocument]:
         """
-        Merge BM25 and FAISS results using Reciprocal Rank Fusion (RRF).
+        Merge BM25 and FAISS results using Reciprocal Rank Fusion (RRF) with company boosting.
         """
         k = 60  # RRF constant
 
@@ -290,7 +429,7 @@ class CorpusRetriever:
         # Sort by RRF score
         sorted_keys = sorted(doc_scores, key=doc_scores.get, reverse=True)
 
-        # De-duplicate by file path (keep highest-scoring chunk per file)
+        # De-duplicate by file path (keep highest-scoring chunk per file to maximize context coverage)
         seen_files: set[str] = set()
         results = []
         for key in sorted_keys:
@@ -302,9 +441,47 @@ class CorpusRetriever:
 
         return results
 
+    def _cohere_rerank_pool(
+        self, query: str, documents: list[RetrievedDocument], top_k: int
+    ) -> list[RetrievedDocument]:
+        """Use Cohere Rerank API to reorder candidate documents."""
+        print(f"[Retriever] Reranking {len(documents)} candidates via Cohere...")
+        headers = {
+            "Authorization": f"Bearer {COHERE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # Format texts for Cohere
+        doc_texts = [doc.content[:1500] for doc in documents]
+        
+        body = {
+            "query": query,
+            "documents": [{"text": t} for t in doc_texts],
+            "model": "rerank-english-v3.0",
+            "top_n": top_k
+        }
+        
+        res = requests.post(
+            "https://api.cohere.com/v1/rerank",
+            json=body,
+            headers=headers,
+            timeout=15
+        )
+        res.raise_for_status()
+        results_data = res.json()["results"]
+        
+        reranked = []
+        for item in results_data:
+            idx = item["index"]
+            doc = documents[idx]
+            doc.score = float(item["relevance_score"])
+            doc.source = "cohere_rerank"
+            reranked.append(doc)
+            
+        return reranked
+
     def validate_file_path(self, path: str) -> bool:
         """Check if a file path exists in the corpus."""
-        # Normalize path
         normalized = path.replace("\\", "/").strip()
         return normalized in self.valid_paths
 

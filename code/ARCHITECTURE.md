@@ -93,24 +93,27 @@ graph TD
 
 ## Retrieval Strategy
 
-### Why Hybrid BM25 + FAISS?
+### Why Hybrid RAG (Voyage AI + BM25 + Cohere Rerank)?
 
 | Method | Strengths | Weaknesses |
 |---|---|---|
 | BM25 | Exact keyword matches, product names, error codes | Misses semantic similarity |
-| FAISS | Understands paraphrased questions, semantic intent | Misses exact terms |
-| **Hybrid (RRF)** | **Best of both — precise AND semantic** | Slightly slower |
+| **Voyage AI (voyage-3)** | State-of-the-art semantic search, multi-lingual support | Misses exact terms, high cost |
+| **Cohere Rerank** | Excellent cross-encoder relevance matching | Adds API latency |
+| **Integrated Pipeline** | **Optimal precision, keyword matches, and deep semantic relevance** | Slightly slower (handled by caching) |
 
-- **Reciprocal Rank Fusion (RRF)** merges results from both systems without needing a trained re-ranker
-- **Company-aware boosting** gives 1.5x weight to documents from the matching product
-- **File path validation** ensures no hallucinated citations (every source_documents path is verified to exist)
+- **Voyage AI Embeddings**: If `VOYAGE_API_KEY` is present, the pipeline upgrades from local `SentenceTransformers` to Voyage's `voyage-3` API.
+- **Cohere Reranking**: If `COHERE_API_KEY` is present, candidates are reranked via Cohere's `rerank-english-v3.0` API, boosting relevance.
+- **Local Disk Cache**: Automatically pickles and serializes computed embeddings locally to `data/.cache/` to prevent redundant API queries.
+- **Company-aware boosting**: Gives 1.5x weight to documents from the matching product.
+- **File path validation**: Ensures no hallucinated citations (every source_documents path is verified to exist).
 
 ### Corpus Trap Handling
 
 The corpus contains deliberately planted contradictions:
 - `dispute-resolution-updated-2026.md` contradicts `changelog-visa-policy-updates-q1-2026.md`
 - `hackerrank-subscription-management.md` is misplaced in the Visa folder
-- When conflicts arise, we retrieve multiple sources and flag low confidence
+- When conflicts arise, we retrieve multiple sources and flag low confidence. Priority is given to the latest updates (e.g. Q1 2026 updates).
 
 ## Safety / Adversarial Handling
 
@@ -192,3 +195,26 @@ The corpus contains deliberately planted contradictions:
 ### Known Unfixed Failure Mode
 
 Confidence calibration is heuristic-based rather than trained on a calibration dataset. The Brier score will likely be suboptimal because confidence adjustments are rule-based (injection → high, no docs → low) rather than learned from actual accuracy distributions. Given more time, I would fine-tune the calibration using the sample tickets as a validation set.
+
+---
+
+## Multimodal Vision Orchestration
+
+The pipeline supports processing images (e.g., screenshots of error alerts, transaction warnings, or user-interface states). 
+- **Scanning**: The prompt content of all user turns is scanned for image extensions (`.png`, `.jpg`, `.jpeg`, `.webp`, `.svg`) or base64 data URIs.
+- **Processing**: Found assets are downloaded (or decoded) and structured into image blocks matching the Anthropic Claude Messages API layout.
+- **Execution**: Visual data is analyzed concurrently with textual context, enabling Claude to resolve issues containing only visual proof (e.g., Row 79 screenshots or proctoring warnings).
+
+---
+
+## Interactive Dashboard & Verification UI
+
+We built a local dashboard that serves as a control center and visualization suite:
+- **Server**: FastAPI application hosted at `http://localhost:8000`.
+- **Metrics Dashboard**: Computes KPIs in real-time, including:
+  - Total tickets processed, replied vs. escalated.
+  - Distribution of risk categories.
+  - Flag counts for prompt injections and PII redactions.
+- **Interactive Sandbox**: Permits pasting custom ticket subject/body text and running the agent synchronously to inspect output fields.
+- **Detail Drawer**: Click on any processed row in the history list to slide out the prompt execution trace, retrieved documents, tool invocations, and detailed justification.
+

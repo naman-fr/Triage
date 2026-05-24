@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autonomous Support Triage Agent — Dashboard</title>
+    <!-- Outfit Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Tailwind CSS (via CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js (via CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Outfit', 'sans-serif'],
+                    },
+                    colors: {
+                        brand: {
+                            50: '#f5f7ff',
+                            100: '#ebf0ff',
+                            200: '#d6e0ff',
+                            500: '#3b82f6',
+                            600: '#2563eb',
+                            700: '#1d4ed8',
+                            900: '#1e3a8a',
+                        },
+                        glass: {
+                            DEFAULT: 'rgba(255, 255, 255, 0.03)',
+                            hover: 'rgba(255, 255, 255, 0.06)',
+                            border: 'rgba(255, 255, 255, 0.08)',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #0b0f19;
+            color: #f3f4f6;
+        }
+        .glass-panel {
+            background: rgba(17, 24, 39, 0.7);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .glow-blue {
+            box-shadow: 0 0 40px -10px rgba(59, 130, 246, 0.3);
+        }
+        .glow-purple {
+            box-shadow: 0 0 40px -10px rgba(139, 92, 246, 0.3);
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.1);
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased selection:bg-brand-500 selection:text-white">
+
+    <!-- Background decorative glows -->
+    <div class="fixed top-0 left-1/4 w-96 h-96 bg-brand-500 rounded-full filter blur-[150px] opacity-10 pointer-events-none"></div>
+    <div class="fixed bottom-10 right-1/4 w-96 h-96 bg-purple-500 rounded-full filter blur-[150px] opacity-10 pointer-events-none"></div>
+
+    <!-- Header -->
+    <header class="border-b border-glass-border glass-panel sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="h-10 w-10 bg-gradient-to-tr from-brand-600 to-purple-600 rounded-xl flex items-center justify-center glow-blue text-white font-extrabold text-xl">
+                A
+            </div>
+            <div>
+                <h1 class="text-xl font-bold tracking-tight">Antigravity Triage</h1>
+                <p class="text-xs text-gray-400">Autonomous Support Agent Dashboard</p>
+            </div>
+        </div>
+        
+        <div class="flex items-center gap-4">
+            <div id="status-indicator" class="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                System Idle
+            </div>
+            <button onclick="runAgent()" id="run-btn" class="px-4 py-2 bg-gradient-to-r from-brand-600 to-purple-600 hover:from-brand-500 hover:to-purple-500 transition-all font-semibold rounded-xl text-sm flex items-center gap-2 glow-blue">
+                Process Tickets
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <main class="flex-1 p-6 grid grid-cols-1 lg:grid-cols-4 gap-6 overflow-hidden">
+        
+        <!-- Sidebar Stats -->
+        <div class="lg:col-span-1 flex flex-col gap-6">
+            <!-- Summary Stats Card -->
+            <div class="glass-panel rounded-2xl p-6 flex flex-col gap-6">
+                <h2 class="text-lg font-bold text-gray-200">Metrics Summary</h2>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="bg-white/5 p-4 rounded-xl border border-white/5">
+                        <div class="text-xs text-gray-400">Total Tickets</div>
+                        <div id="total-count" class="text-3xl font-extrabold mt-1">0</div>
+                    </div>
+                    <div class="bg-white/5 p-4 rounded-xl border border-white/5">
+                        <div class="text-xs text-gray-400">Replied</div>
+                        <div id="replied-count" class="text-3xl font-extrabold text-brand-400 mt-1">0</div>
+                    </div>
+                    <div class="bg-white/5 p-4 rounded-xl border border-white/5">
+                        <div class="text-xs text-gray-400">Escalated</div>
+                        <div id="escalated-count" class="text-3xl font-extrabold text-amber-400 mt-1">0</div>
+                    </div>
+                    <div class="bg-white/5 p-4 rounded-xl border border-white/5">
+                        <div class="text-xs text-gray-400">Injections Blocked</div>
+                        <div id="injection-count" class="text-3xl font-extrabold text-rose-500 mt-1">0</div>
+                    </div>
+                </div>
+
+                <div class="border-t border-white/5 pt-4 flex flex-col gap-3">
+                    <div class="flex items-center justify-between text-sm">
+                        <span class="text-gray-400">Avg Confidence:</span>
+                        <span id="avg-confidence" class="font-bold text-emerald-400">0%</span>
+                    </div>
+                    <div class="flex items-center justify-between text-sm">
+                        <span class="text-gray-400">PII Redacted:</span>
+                        <span id="pii-count" class="font-bold text-indigo-400">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart Panel -->
+            <div class="glass-panel rounded-2xl p-6 flex flex-col gap-4">
+                <h2 class="text-lg font-bold text-gray-200">Distribution</h2>
+                <div class="h-64 relative">
+                    <canvas id="distribution-chart"></canvas>
+                </div>
+            </div>
+            
+            <!-- Quick Test Sandbox -->
+            <div class="glass-panel rounded-2xl p-6 flex flex-col gap-4">
+                <h2 class="text-lg font-bold text-gray-200">Interactive Sandbox</h2>
+                <div class="flex flex-col gap-2">
+                    <label class="text-xs text-gray-400">Company</label>
+                    <select id="sandbox-company" class="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-brand-500">
+                        <option value="DevPlatform">DevPlatform</option>
+                        <option value="Claude">Claude</option>
+                        <option value="Visa">Visa</option>
+                        <option value="None">None</option>
+                    </select>
+                </div>
+                <div class="flex flex-col gap-2">
+                    <label class="text-xs text-gray-400">Subject</label>
+                    <input id="sandbox-subject" type="text" class="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-brand-500" placeholder="e.g., Blocked Card">
+                </div>
+                <div class="flex flex-col gap-2">
+                    <label class="text-xs text-gray-400">Conversation / Issue Message</label>
+                    <textarea id="sandbox-issue" rows="3" class="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-brand-500 resize-none" placeholder="Enter support ticket text here..."></textarea>
+                </div>
+                <button onclick="testSandbox()" id="sandbox-btn" class="w-full py-2 bg-brand-600 hover:bg-brand-500 transition-colors font-semibold rounded-xl text-sm">
+                    Submit Query to Agent
+                </button>
+            </div>
+        </div>
+
+        <!-- Main Ticket Explorer -->
+        <div class="lg:col-span-3 flex flex-col gap-6 overflow-hidden h-[80vh]">
+            <div class="glass-panel rounded-2xl flex flex-col flex-1 overflow-hidden">
+                <!-- Search & Filters -->
+                <div class="px-6 py-4 border-b border-glass-border flex items-center justify-between gap-4 bg-white/2">
+                    <h2 class="text-lg font-bold text-gray-200">Ticket processing history</h2>
+                    <div class="flex items-center gap-3">
+                        <input id="search-input" onkeyup="filterTickets()" type="text" class="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-brand-500 w-64" placeholder="Filter by company, area, issue...">
+                        <select id="risk-filter" onchange="filterTickets()" class="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-300 focus:outline-none">
+                            <option value="">All Risks</option>
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                            <option value="critical">Critical</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Table Container -->
+                <div class="flex-1 overflow-auto custom-scrollbar">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="text-xs font-semibold text-gray-400 border-b border-glass-border uppercase bg-white/2">
+                                <th class="py-3 px-6">ID</th>
+                                <th class="py-3 px-6">Company</th>
+                                <th class="py-3 px-6">Subject</th>
+                                <th class="py-3 px-6">Status</th>
+                                <th class="py-3 px-6">Risk</th>
+                                <th class="py-3 px-6">Confidence</th>
+                                <th class="py-3 px-6">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tickets-table-body" class="divide-y divide-white/5">
+                            <!-- Rows dynamically populated -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Drawer Modal for Details -->
+    <div id="detail-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex justify-end transition-opacity duration-300 opacity-0 pointer-events-none">
+        <div class="w-full max-w-3xl bg-[#0e1322] border-l border-glass-border h-full p-8 flex flex-col gap-6 shadow-2xl overflow-y-auto custom-scrollbar transform translate-x-full transition-transform duration-300">
+            <div class="flex items-center justify-between border-b border-white/10 pb-4">
+                <div>
+                    <span id="detail-company" class="text-xs font-extrabold uppercase px-2 py-1 bg-brand-500/10 text-brand-400 rounded-md border border-brand-500/20">DevPlatform</span>
+                    <h2 id="detail-subject" class="text-2xl font-bold mt-2">Error during account sign up</h2>
+                </div>
+                <button onclick="closeModal()" class="text-gray-400 hover:text-white text-xl font-bold">&times;</button>
+            </div>
+
+            <!-- Grid details -->
+            <div class="grid grid-cols-3 gap-4">
+                <div class="bg-white/5 p-3 rounded-xl">
+                    <div class="text-xs text-gray-400">Risk Level</div>
+                    <span id="detail-risk" class="text-sm font-bold capitalize">Low</span>
+                </div>
+                <div class="bg-white/5 p-3 rounded-xl">
+                    <div class="text-xs text-gray-400">Confidence Score</div>
+                    <span id="detail-confidence" class="text-sm font-bold text-emerald-400">95%</span>
+                </div>
+                <span id="detail-status-pill" class="bg-white/5 p-3 rounded-xl flex flex-col">
+                    <div class="text-xs text-gray-400">Status</div>
+                    <span id="detail-status" class="text-sm font-bold capitalize">Replied</span>
+                </span>
+            </div>
+
+            <!-- Conversation turns -->
+            <div class="flex flex-col gap-3">
+                <h3 class="text-sm font-bold text-gray-300">Conversation History</h3>
+                <div id="detail-conversation" class="flex flex-col gap-3 max-h-60 overflow-y-auto custom-scrollbar bg-black/20 p-4 rounded-xl border border-white/5">
+                    <!-- Turns filled dynamically -->
+                </div>
+            </div>
+
+            <!-- Agent Response -->
+            <div class="flex flex-col gap-3">
+                <h3 class="text-sm font-bold text-gray-300">Agent Response</h3>
+                <div id="detail-response" class="bg-brand-900/10 border border-brand-500/20 text-gray-200 p-4 rounded-xl text-sm leading-relaxed whitespace-pre-line">
+                    <!-- Text filled -->
+                </div>
+            </div>
+
+            <!-- Rationale & Justification -->
+            <div class="flex flex-col gap-3">
+                <h3 class="text-sm font-bold text-gray-300">Justification & Analysis</h3>
+                <div id="detail-justification" class="bg-black/30 border border-white/5 text-gray-300 p-4 rounded-xl text-xs font-mono whitespace-pre-wrap">
+                    <!-- Text -->
+                </div>
+            </div>
+
+            <!-- Retracted Documents & Tools -->
+            <div class="grid grid-cols-2 gap-6">
+                <div class="flex flex-col gap-3">
+                    <h3 class="text-sm font-bold text-gray-300">Source Documents</h3>
+                    <div id="detail-sources" class="flex flex-col gap-2">
+                        <!-- Documents -->
+                    </div>
+                </div>
+                <div class="flex flex-col gap-3">
+                    <h3 class="text-sm font-bold text-gray-300">Tools Triggered</h3>
+                    <div id="detail-tools" class="flex flex-col gap-2">
+                        <!-- Tools list -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script Section -->
+    <script>
+        let ticketData = [];
+        let distChart = null;
+
+        // Fetch data initially
+        async function loadData() {
+            try {
+                const res = await fetch('/api/results');
+                if (res.ok) {
+                    ticketData = await res.json();
+                    populateTable(ticketData);
+                    updateStats(ticketData);
+                    renderChart(ticketData);
+                }
+            } catch (err) {
+                console.error("Failed to load results:", err);
+            }
+        }
+
+        function populateTable(data) {
+            const body = document.getElementById('tickets-table-body');
+            body.innerHTML = '';
+            
+            data.forEach((row, index) => {
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-white/5 cursor-pointer transition-colors';
+                tr.onclick = () => showDetails(row);
+
+                // Risk pill
+                let riskColor = 'text-gray-400 bg-gray-400/10 border-gray-400/20';
+                if (row.risk_level === 'medium') riskColor = 'text-amber-400 bg-amber-400/10 border-amber-400/20';
+                if (row.risk_level === 'high') riskColor = 'text-orange-400 bg-orange-400/10 border-orange-400/20';
+                if (row.risk_level === 'critical') riskColor = 'text-rose-500 bg-rose-500/10 border-rose-500/20 animate-pulse';
+
+                // Status pill
+                const statusColor = row.status === 'replied' ? 'text-brand-400 bg-brand-500/10' : 'text-purple-400 bg-purple-500/10';
+
+                tr.innerHTML = `
+                    <td class="py-4 px-6 font-mono text-xs text-gray-400">${index + 1}</td>
+                    <td class="py-4 px-6 font-semibold">${row.company}</td>
+                    <td class="py-4 px-6 text-sm max-w-xs truncate">${row.subject || 'No Subject'}</td>
+                    <td class="py-4 px-6">
+                        <span class="px-2 py-1 rounded-md text-xs font-bold border border-current ${statusColor}">${row.status}</span>
+                    </td>
+                    <td class="py-4 px-6">
+                        <span class="px-2 py-1 rounded-md text-xs font-bold border ${riskColor}">${row.risk_level}</span>
+                    </td>
+                    <td class="py-4 px-6 font-mono text-sm">${Math.round(row.confidence_score * 100)}%</td>
+                    <td class="py-4 px-6 text-xs text-brand-400 hover:underline">View details &rarr;</td>
+                `;
+                body.appendChild(tr);
+            });
+        }
+
+        function updateStats(data) {
+            document.getElementById('total-count').innerText = data.length;
+            document.getElementById('replied-count').innerText = data.filter(r => r.status === 'replied').length;
+            document.getElementById('escalated-count').innerText = data.filter(r => r.status === 'escalated').length;
+            document.getElementById('injection-count').innerText = data.filter(r => r.justification && r.justification.includes('ADVERSARIAL')).length;
+            
+            const pii = data.filter(r => r.pii_detected === 'true').length;
+            document.getElementById('pii-count').innerText = pii;
+
+            const avgConf = data.length ? data.reduce((sum, r) => sum + parseFloat(r.confidence_score), 0) / data.length : 0;
+            document.getElementById('avg-confidence').innerText = `${Math.round(avgConf * 100)}%`;
+        }
+
+        function renderChart(data) {
+            const ctx = document.getElementById('distribution-chart').getContext('2d');
+            
+            const low = data.filter(r => r.risk_level === 'low').length;
+            const med = data.filter(r => r.risk_level === 'medium').length;
+            const high = data.filter(r => r.risk_level === 'high').length;
+            const crit = data.filter(r => r.risk_level === 'critical').length;
+
+            if (distChart) distChart.destroy();
+
+            distChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Low', 'Medium', 'High', 'Critical'],
+                    datasets: [{
+                        data: [low, med, high, crit],
+                        backgroundColor: [
+                            'rgba(156, 163, 175, 0.6)',
+                            'rgba(245, 158, 11, 0.6)',
+                            'rgba(249, 115, 22, 0.6)',
+                            'rgba(239, 68, 68, 0.6)'
+                        ],
+                        borderColor: [
+                            'rgba(156, 163, 175, 1)',
+                            'rgba(245, 158, 11, 1)',
+                            'rgba(249, 115, 22, 1)',
+                            'rgba(239, 68, 68, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#9ca3af', font: { family: 'Outfit' } }
+                        }
+                    }
+                }
+            });
+        }
+
+        function filterTickets() {
+            const query = document.getElementById('search-input').value.toLowerCase();
+            const risk = document.getElementById('risk-filter').value;
+            
+            const filtered = ticketData.filter(row => {
+                const matchesSearch = row.company.toLowerCase().includes(query) ||
+                                      (row.subject && row.subject.toLowerCase().includes(query)) ||
+                                      row.product_area.toLowerCase().includes(query) ||
+                                      row.response.toLowerCase().includes(query);
+                const matchesRisk = risk === '' || row.risk_level === risk;
+                return matchesSearch && matchesRisk;
+            });
+            populateTable(filtered);
+        }
+
+        function showDetails(row) {
+            document.getElementById('detail-company').innerText = row.company;
+            document.getElementById('detail-subject').innerText = row.subject || 'No Subject';
+            document.getElementById('detail-risk').innerText = row.risk_level;
+            document.getElementById('detail-confidence').innerText = `${Math.round(row.confidence_score * 100)}%`;
+            document.getElementById('detail-status').innerText = row.status;
+            
+            // Build conversation HTML
+            const convBox = document.getElementById('detail-conversation');
+            convBox.innerHTML = '';
+            
+            try {
+                const turns = JSON.parse(row.issue);
+                turns.forEach(turn => {
+                    const div = document.createElement('div');
+                    div.className = turn.role === 'user' ? 'self-end bg-brand-600/20 text-brand-200 border border-brand-500/10 max-w-[85%] p-3 rounded-2xl rounded-tr-none text-sm' : 'self-start bg-white/5 text-gray-300 border border-white/5 max-w-[85%] p-3 rounded-2xl rounded-tl-none text-sm';
+                    div.innerHTML = `<div class="text-[10px] font-bold text-gray-500 mb-1 uppercase">${turn.role}</div><div>${turn.content}</div>`;
+                    convBox.appendChild(div);
+                });
+            } catch(e) {
+                // Not JSON string, just plain text
+                const div = document.createElement('div');
+                div.className = 'self-end bg-brand-600/20 text-brand-200 max-w-[85%] p-3 rounded-2xl rounded-tr-none text-sm';
+                div.innerHTML = `<div class="text-[10px] font-bold text-gray-500 mb-1 uppercase">user</div><div>${row.issue}</div>`;
+                convBox.appendChild(div);
+            }
+
+            document.getElementById('detail-response').innerText = row.response || 'No Response Generated';
+            document.getElementById('detail-justification').innerText = row.justification || 'No Justification';
+
+            // Document citations
+            const sourcesDiv = document.getElementById('detail-sources');
+            sourcesDiv.innerHTML = '';
+            if (row.source_documents) {
+                row.source_documents.split('|').forEach(src => {
+                    const span = document.createElement('span');
+                    span.className = 'px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-mono text-gray-300 truncate';
+                    span.title = src;
+                    span.innerText = src.split('/').pop();
+                    sourcesDiv.appendChild(span);
+                });
+            } else {
+                sourcesDiv.innerHTML = '<span class="text-xs text-gray-500">No sources cited</span>';
+            }
+
+            // Actions
+            const toolsDiv = document.getElementById('detail-tools');
+            toolsDiv.innerHTML = '';
+            try {
+                const tools = JSON.parse(row.actions_taken);
+                if (tools && tools.length > 0) {
+                    tools.forEach(tool => {
+                        const div = document.createElement('div');
+                        div.className = 'p-3 bg-purple-500/10 border border-purple-500/20 rounded-lg text-xs text-purple-300';
+                        div.innerHTML = `<strong class="font-mono text-purple-200">${tool.action}</strong><div class="mt-1 font-mono text-[10px] text-purple-400">${JSON.stringify(tool.parameters)}</div>`;
+                        toolsDiv.appendChild(div);
+                    });
+                } else {
+                    toolsDiv.innerHTML = '<span class="text-xs text-gray-500">No tools triggered</span>';
+                }
+            } catch(e) {
+                toolsDiv.innerHTML = '<span class="text-xs text-gray-500">No tools triggered</span>';
+            }
+
+            // Show drawer
+            const modal = document.getElementById('detail-modal');
+            const drawer = modal.querySelector('div');
+            modal.classList.remove('opacity-0', 'pointer-events-none');
+            drawer.classList.remove('translate-x-full');
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('detail-modal');
+            const drawer = modal.querySelector('div');
+            modal.classList.add('opacity-0', 'pointer-events-none');
+            drawer.classList.add('translate-x-full');
+        }
+
+        async function runAgent() {
+            const indicator = document.getElementById('status-indicator');
+            const btn = document.getElementById('run-btn');
+            
+            indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20';
+            indicator.innerHTML = '<span class="h-2 w-2 rounded-full bg-amber-400 animate-ping"></span>Processing...';
+            btn.disabled = true;
+            btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+            try {
+                const res = await fetch('/api/run', { method: 'POST' });
+                if (res.ok) {
+                    await loadData();
+                    indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+                    indicator.innerHTML = '<span class="h-2 w-2 rounded-full bg-emerald-400"></span>Idle';
+                } else {
+                    alert("Run failed! Ensure API keys are set in .env.");
+                }
+            } catch(e) {
+                alert("Error during execution: " + e);
+            } finally {
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        async function testSandbox() {
+            const btn = document.getElementById('sandbox-btn');
+            const originalText = btn.innerText;
+            btn.disabled = true;
+            btn.innerText = 'Analyzing...';
+            
+            const co = document.getElementById('sandbox-company').value;
+            const sub = document.getElementById('sandbox-subject').value;
+            const issue = document.getElementById('sandbox-issue').value;
+
+            try {
+                const res = await fetch('/api/sandbox', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ company: co, subject: sub, issue: issue })
+                });
+                if (res.ok) {
+                    const result = await res.json();
+                    showDetails(result);
+                } else {
+                    alert("Sandbox call failed! Ensure API keys are set.");
+                }
+            } catch(e) {
+                alert("Error: " + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = originalText;
+            }
+        }
+
+        // On load
+        window.onload = loadData;
+    </script>
+</body>
+</html>
