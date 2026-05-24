@@ -1,0 +1,25 @@
+# MLE Hiring Challenge — Pinned Dependencies
+# LLM Providers
+google-generativeai==0.8.5
+openai==1.82.0
+anthropic==0.52.0
+groq==0.25.0
+
+# RAG & Retrieval
+sentence-transformers==3.4.1
+faiss-cpu==1.9.0.post1
+rank-bm25==0.2.2
+
+# Data Processing
+pandas==2.2.3
+pydantic==2.11.3
+
+# PII Detection
+regex==2024.11.6
+
+# Environment
+python-dotenv==1.1.0
+
+# Utilities
+tqdm==4.67.1
+numpy==2.2.6
