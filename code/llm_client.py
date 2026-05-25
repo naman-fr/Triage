@@ -25,19 +25,41 @@ IMAGE_URL_PATTERN = re.compile(
 
 def _extract_and_download_images(text: str) -> Tuple[str, List[Dict]]:
     """
-    Extracts image URLs or Base64 payloads from the text prompt,
-    downloads and encodes them, and returns (cleaned_text, image_blocks).
+    Extracts image URLs, Base64 payloads, or local file paths from the text prompt,
+    downloads or reads and encodes them, and returns (cleaned_text, image_blocks).
     Used for multimodal analysis of screenshots, error logs, etc.
     """
+    from pathlib import Path
     cleaned_text = text
     image_blocks = []
     
-    matches = IMAGE_URL_PATTERN.findall(text)
-    for match in matches:
-        cleaned_text = cleaned_text.replace(match, "")
+    # 1. Search for markdown images: ![alt](path)
+    markdown_pattern = re.compile(r'!\[.*?\]\((.*?)\)', re.IGNORECASE)
+    md_matches = markdown_pattern.findall(text)
+    
+    # 2. Search for raw http/https links or base64 data URIs
+    raw_matches = IMAGE_URL_PATTERN.findall(text)
+    
+    # 3. Combine matches and filter duplicates
+    all_targets = list(set(md_matches + raw_matches))
+    
+    # 4. If no matches were found, look for plain word paths ending with image extensions
+    if not all_targets:
+        plain_path_pattern = re.compile(r'(\b\S+\.(?:png|jpg|jpeg|gif|webp|svg)\b)', re.IGNORECASE)
+        all_targets = list(set(plain_path_pattern.findall(text)))
+
+    for target in all_targets:
+        target_str = target.strip()
+        if not target_str:
+            continue
+            
+        # Clean target_str of surrounding quotes if any
+        target_str = target_str.strip('"\'()')
+        
         try:
-            if match.startswith("data:image/"):
-                header, base64_data = match.split(",", 1)
+            # Case A: Base64 data URI
+            if target_str.startswith("data:image/"):
+                header, base64_data = target_str.split(",", 1)
                 media_type = header.split(";")[0].split(":")[1]
                 image_blocks.append({
                     "type": "image",
@@ -47,8 +69,11 @@ def _extract_and_download_images(text: str) -> Tuple[str, List[Dict]]:
                         "data": base64_data.strip()
                     }
                 })
-            else:
-                res = requests.get(match, timeout=10)
+                cleaned_text = cleaned_text.replace(target, "")
+                
+            # Case B: Remote URL
+            elif target_str.startswith("http://") or target_str.startswith("https://"):
+                res = requests.get(target_str, timeout=10)
                 res.raise_for_status()
                 content_type = res.headers.get("Content-Type", "image/png")
                 if "image" not in content_type:
@@ -62,8 +87,47 @@ def _extract_and_download_images(text: str) -> Tuple[str, List[Dict]]:
                         "data": img_data
                     }
                 })
+                cleaned_text = cleaned_text.replace(target, "")
+                
+            # Case C: Local file path
+            else:
+                # Resolve paths (absolute or relative to current repository root)
+                local_path = Path(target_str)
+                if not local_path.is_absolute():
+                    # Check relative to current working dir or repo root
+                    from config import REPO_ROOT
+                    candidate_paths = [
+                        Path.cwd() / local_path,
+                        REPO_ROOT / local_path,
+                        local_path
+                    ]
+                    for cp in candidate_paths:
+                        if cp.exists() and cp.is_file():
+                            local_path = cp
+                            break
+                            
+                if local_path.exists() and local_path.is_file():
+                    # Determine media type based on suffix
+                    suffix = local_path.suffix.lower().lstrip(".")
+                    media_type = f"image/{suffix}" if suffix != "svg" else "image/svg+xml"
+                    if suffix in ["jpg", "jpeg"]:
+                        media_type = "image/jpeg"
+                    
+                    with open(local_path, "rb") as f:
+                        img_data = base64.b64encode(f.read()).decode("utf-8")
+                        
+                    image_blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": img_data
+                        }
+                    })
+                    cleaned_text = cleaned_text.replace(target, "")
+                    print(f"[LLM Client] Successfully loaded local visual attachment: {local_path}")
         except Exception as e:
-            print(f"[LLM Client] Multimodal error processing image {match[:50]}: {e}")
+            print(f"[LLM Client] Multimodal error processing target {target_str[:50]}: {e}")
             
     return cleaned_text.strip(), image_blocks
 

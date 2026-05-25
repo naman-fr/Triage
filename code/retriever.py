@@ -55,6 +55,8 @@ class CorpusRetriever:
         self.faiss_index = None
         self.embeddings: Optional[np.ndarray] = None
         self._indexed = False
+        self.voyage_failed = False
+        self.cohere_failed = False
 
         # Set for validating file paths
         self.valid_paths: set[str] = set()
@@ -323,11 +325,12 @@ class CorpusRetriever:
         merged = self._merge_results(bm25_results, faiss_results, company_filter)
 
         # Apply Cohere Reranking if API key is present
-        if COHERE_API_KEY and merged:
+        if COHERE_API_KEY and not self.cohere_failed and merged:
             try:
                 merged = self._cohere_rerank_pool(query, merged, top_k)
             except Exception as e:
-                print(f"[Retriever] Cohere rerank failed: {e}. Falling back to standard RRF ranking.")
+                print(f"[Retriever] Cohere rerank failed: {e}. Blacklisting Cohere and falling back to standard RRF ranking.")
+                self.cohere_failed = True
                 merged = merged[:top_k]
         else:
             merged = merged[:top_k]
@@ -361,7 +364,7 @@ class CorpusRetriever:
             return []
 
         # Check if we are using Voyage for the index
-        use_voyage = bool(VOYAGE_API_KEY)
+        use_voyage = bool(VOYAGE_API_KEY) and not self.voyage_failed
         query_embedding = None
 
         if use_voyage:
@@ -383,7 +386,8 @@ class CorpusRetriever:
                 res.raise_for_status()
                 query_embedding = np.array(res.json()["data"][0]["embedding"], dtype=np.float32)
             except Exception as e:
-                print(f"[Retriever] Voyage query embedding failed: {e}. Falling back to local SentenceTransformers.")
+                print(f"[Retriever] Voyage query embedding failed: {e}. Blacklisting Voyage and falling back to local SentenceTransformers.")
+                self.voyage_failed = True
                 use_voyage = False
 
         if not use_voyage or query_embedding is None:
